@@ -43,18 +43,18 @@ print(f"Fetching 3 years of data for: {ticker_list}")
 raw_data = yf.download(ticker_list, period="3y")
 
 if raw_data.empty:
-    print("Error: No data found.")
-    exit()
+    st.error("Error: No data found.")
+    st.stop()
 
 print("Successfully fetched real price data!")
 
 # --- Phase 2, task 2: Real Returns Calculation ---
 
-close_prices = raw_data["Close"]
+close_prices = raw_data["Close"][ticker_list]
 daily_returns = close_prices.pct_change()
 annual_returns = daily_returns.mean() * 252
 
-print("Annualized expected returns based on 3y history:")
+print("Annualised expected returns based on 3y history:")
 print(annual_returns)
 
 # --- Phase 2, task 3: Real volatility calculation ---
@@ -62,16 +62,15 @@ print(annual_returns)
 daily_returns = close_prices.pct_change()
 annual_volatility = daily_returns.std() * np.sqrt(252)
 
-print("Annualized volatility (real risk):")
+print("Annualised volatility (real risk):")
 print(annual_volatility)
 
 # --- Phase 2: Step 4, Overwriting with real data ---
 
 for asset in assets:
     ticker_name = asset["ticker"] 
-    
-asset["expected_return"] = annual_returns[ticker_name] 
-asset["risk_score"] = annual_volatility[ticker_name] 
+    asset["expected_return"] = annual_returns[ticker_name] 
+    asset["risk_score"] = annual_volatility[ticker_name] 
 
 print("Successfully integrated real market data into the asset list.")
 print(f"New data for {assets[0]['ticker']}: Return={assets[0]['expected_return']:.2%}, Risk={assets[0]['risk_score']:.2%}")
@@ -84,7 +83,9 @@ def get_real_data(ticker_list):
         data = yf.download(ticker_list, period="3y")["Close"]
         if data.empty:
             raise ValueError("No data returned from API.")
-        return data
+        # FIX: keeps the columns in the user's selection order and removes missing rows
+        data = data[ticker_list]
+        return data.dropna()
     except Exception as e:
         print(f"An error occurred: {e}")
         return None
@@ -92,11 +93,11 @@ def get_real_data(ticker_list):
 # --- Phase 3: step 1, UI setup ---
 
 
-st.title("Portfolio Optimizer")
+st.title("Portfolio Optimiser")
 st.write("This tool calculates the best asset allocation based on historical risk and return.")
 
 
-st.sidebar.header("Optimizer Settings")
+st.sidebar.header("Optimiser Settings")
 
 
 available_options = ["AAPL", "MSFT", "JNJ", "VTI", "BND", "TSLA", "GOOGL", "AMZN"]
@@ -114,89 +115,101 @@ num_simulations = st.sidebar.slider(
     value=1000
 )
 
-run_button = st.sidebar.button("Run Optimization")
+run_button = st.sidebar.button("Run Optimisation")
 
 # --- PHASE 3, TASK 2: MONTE CARLO SIMULATION ---
 
 if run_button:
-    st.write("🔄 Fetching latest data and running simulations...")
-    data = yf.download(selected_tickers, period="3y")["Close"]
-    
-    if data.empty:
-        st.error("Could not find data for these tickers. Please try again.")
+    # FIX: at least 2 assets are needed, otherwise there is nothing to combine
+    if len(selected_tickers) < 2:
+        st.error("Please select at least 2 assets.")
     else:
-        daily_returns = data.pct_change()
-        current_returns = daily_returns.mean() * 252
-        current_vol = daily_returns.std() * np.sqrt(252)
-
-        all_weights = []
-        ret_arr = []
-        vol_arr = []
-        sharpe_arr = []
-
+        st.write("🔄 Fetching latest data and running simulations...")
+        # FIX: now uses the error-handling function from Phase 2, Step 5
+        data = get_real_data(selected_tickers)
         
-        for i in range(num_simulations):
-            weights = np.array(np.random.random(len(selected_tickers)))
-            weights = weights / np.sum(weights)
-            all_weights.append(weights)
+        # FIX: everything below is nested in the else, so a failed download
+        # shows the error message instead of crashing the app
+        if data is None or data.empty:
+            st.error("Could not find data for these tickers. Please try again.")
+        else:
+            daily_returns = data.pct_change().dropna()
+            current_returns = daily_returns.mean() * 252
+            current_vol = daily_returns.std() * np.sqrt(252)
+            # FIX: annualised covariance matrix, needed to capture diversification
+            cov_matrix = daily_returns.cov() * 252
 
-            p_ret = np.sum(current_returns * weights)
-            ret_arr.append(p_ret)
+            all_weights = []
+            ret_arr = []
+            vol_arr = []
+            sharpe_arr = []
 
-            p_vol = np.sum(current_vol * weights)
-            vol_arr.append(p_vol)
+            
+            for i in range(num_simulations):
+                weights = np.array(np.random.random(len(selected_tickers)))
+                weights = weights / np.sum(weights)
+                all_weights.append(weights)
 
-            sharpe_arr.append(p_ret / p_vol)
+                p_ret = np.sum(current_returns.values * weights)
+                ret_arr.append(p_ret)
 
-        
-        sim_data = {
-            'Return': ret_arr,
-            'Risk': vol_arr,
-            'Sharpe': sharpe_arr
-        }
-        sim_df = pd.DataFrame(sim_data)
-        
-        st.success("Simulations Complete!") 
+                # FIX: portfolio volatility now uses the covariance matrix
+                # (was: np.sum(current_vol * weights), which ignores correlation)
+                p_vol = np.sqrt(weights @ cov_matrix.values @ weights)
+                vol_arr.append(p_vol)
 
- # --- PHASE 3, TASK 3: IDENTIFYING THE BEST PORTFOLIO ---
+                sharpe_arr.append(p_ret / p_vol)
 
-    max_sharpe_idx = sim_df['Sharpe'].idxmax()
-    best_ret = sim_df.loc[max_sharpe_idx, 'Return']
-    best_vol = sim_df.loc[max_sharpe_idx, 'Risk']
-    best_weights = all_weights[max_sharpe_idx]
+            
+            sim_data = {
+                'Return': ret_arr,
+                'Risk': vol_arr,
+                'Sharpe': sharpe_arr
+            }
+            sim_df = pd.DataFrame(sim_data)
+            
+            st.success("Simulations Complete!") 
+
+            # --- PHASE 3, TASK 3: IDENTIFYING THE BEST PORTFOLIO ---
+
+            max_sharpe_idx = sim_df['Sharpe'].idxmax()
+            best_ret = sim_df.loc[max_sharpe_idx, 'Return']
+            best_vol = sim_df.loc[max_sharpe_idx, 'Risk']
+            best_weights = all_weights[max_sharpe_idx]
 
 
-    st.subheader("🏆 Optimal Portfolio Found")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Expected Return", f"{best_ret:.2%}")
-    col2.metric("Annual Risk", f"{best_vol:.2%}")
-    col3.metric("Sharpe Ratio", f"{sim_df.loc[max_sharpe_idx, 'Sharpe']:.2f}")
+            st.subheader("🏆 Optimal Portfolio Found")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Expected Return", f"{best_ret:.2%}")
+            col2.metric("Annual Risk", f"{best_vol:.2%}")
+            col3.metric("Sharpe Ratio", f"{sim_df.loc[max_sharpe_idx, 'Sharpe']:.2f}")
 
-    st.write("### Recommended Allocations:")
-    allocation_df = pd.DataFrame({
-        'Asset': selected_tickers,
-        'Weight': best_weights
-    })
-    st.table(allocation_df)
+            st.write("### Recommended Allocations:")
+            allocation_df = pd.DataFrame({
+                'Asset': selected_tickers,
+                'Weight (%)': (best_weights * 100).round(1)
+            })
+            st.table(allocation_df)
 
-# --- PHASE 3, TASK 4: VISUALIZATION ---
-    st.write("### Portfolio Risk vs. Return")
-    
-    fig = px.scatter(
-    sim_df, 
-    x='Risk', 
-    y='Return', 
-    color='Sharpe',
-    labels={'Risk': 'Annualized Risk (Volatility)', 'Return': 'Annualized Return'},
-    title="Monte Carlo Simulation: Finding the Efficient Frontier",
-    color_continuous_scale='Viridis'
-    )
-    
-    fig.add_scatter(
-    x=[best_vol], 
-    y=[best_ret], 
-    marker=dict(color='red', size=15, symbol='star'),
-    name="Optimal Portfolio"
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
+            # --- PHASE 3, TASK 4: VISUALISATION ---
+            st.write("### Portfolio Risk vs. Return")
+            
+            
+            fig = px.scatter(
+                sim_df, 
+                x='Risk', 
+                y='Return', 
+                color='Sharpe',
+                labels={'Risk': 'Annualised Risk (Volatility)', 'Return': 'Annualised Return'},
+                title="Monte Carlo Simulation: Finding the Efficient Frontier",
+                color_continuous_scale='Viridis'
+            )
+            
+            fig.add_scatter(
+                x=[best_vol], 
+                y=[best_ret], 
+                marker=dict(color='red', size=15, symbol='star'),
+                name="Optimal Portfolio"
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
